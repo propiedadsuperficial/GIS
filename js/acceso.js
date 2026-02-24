@@ -6,8 +6,8 @@
 // - Redirigir a PROD al finalizar, sin oobCode/mode/apiKey/lang en la URL.
 // - Si ya hay sesión en la página de acceso, redirigir a PROD con los mismos parámetros.
 
-const PROD_BASE  = 'https://propiedadsuperficial.github.io/demo2/';
-const ACCESO_URL = 'https://propiedadsuperficial.github.io/demo2/acceso/acceso.html';
+const PROD_BASE  = 'https://propiedadsuperficial.github.io/GIS/';
+const ACCESO_URL = 'https://propiedadsuperficial.github.io/GIS/acceso/acceso.html';
 
 // --- Utilidades de URL / parámetros ---
 const MAP_KEYS = ['area', 'lat', 'lng', 'zoom'];
