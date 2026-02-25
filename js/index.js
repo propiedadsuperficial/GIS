@@ -21,6 +21,10 @@
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
 import {
+  getAuth, onAuthStateChanged, signOut,
+  isSignInWithEmailLink, signInWithEmailLink   // ← AGREGAR ESTAS DOS
+} from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
+import {
   getFirestore, collection, setDoc, onSnapshot, doc,
   serverTimestamp, query, limit
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
@@ -44,6 +48,45 @@ const firebaseConfig = {
 const app  = initializeApp(firebaseConfig);
 const db   = getFirestore(app);
 const auth = getAuth(app);
+
+// =============================================================================
+// 0b) COMPLETAR EMAIL LINK si la URL contiene oobCode (viene del correo)
+// =============================================================================
+(async () => {
+  if (!isSignInWithEmailLink(auth, window.location.href)) return;
+
+  let email = '';
+  try { email = localStorage.getItem('demo2:emailForSignIn') || ''; } catch {}
+  if (!email) {
+    email = window.prompt('Confirma tu correo para completar el acceso:') || '';
+  }
+  email = email.trim();
+  if (!email) return;
+
+  try {
+    await signInWithEmailLink(auth, email, window.location.href);
+    try { localStorage.removeItem('demo2:emailForSignIn'); } catch {}
+    // Limpiar oobCode/apiKey de la URL sin recargar
+    const clean = new URL(window.location.href);
+    ['apiKey','oobCode','mode','lang'].forEach(k => clean.searchParams.delete(k));
+    window.history.replaceState(null, '', clean.toString());
+  } catch (err) {
+    console.error('❌ signInWithEmailLink:', err);
+    alert('Error al completar el acceso: ' + (err?.message ?? err));
+  }
+})();
+
+Visualmente, en tu archivo queda así:
+```
+// 0) FIREBASE
+...
+const auth = getAuth(app);
+
+// 0b) COMPLETAR EMAIL LINK   ← PEGAR AQUÍ
+(async () => { ... })();
+
+// 1) DETECCIÓN DE ALMACENAMIENTO BLOQUEADO
+...
 
 // =============================================================================
 // 1) DETECCIÓN DE ALMACENAMIENTO BLOQUEADO
