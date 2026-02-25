@@ -1,6 +1,6 @@
 // =============================================================================
 // js/index.js — GIS Pucobre
-// Versión: 5.0 — Autenticación Email Link (passwordless)
+// Versión: 5.1 — Autenticación Email Link (passwordless)
 //
 // Flujo de identidad:
 //   VISOR  → sin sesión, lectura pública Firestore
@@ -8,28 +8,19 @@
 //            el usuario ingresa su correo @pucobre.cl, recibe un enlace,
 //            hace clic y queda autenticado — sin contraseña, sin Google
 //
-// Cambios respecto a v4:
-//   ✅ Eliminado GoogleAuthProvider, signInWithPopup, setPersistence manual
-//   ✅ loginBtn redirige a acceso/acceso.html (preservando ?area/lat/lng/zoom)
-//   ✅ logoutBtn llama signOut() y vuelve a modo VISOR
-//   ✅ onAuthStateChanged detecta sesión Email Link → modo EDITOR automático
-//   ✅ Sin prompt() de correo — identidad 100% desde Firebase Auth
-//   ✅ Preservado todo: Leaflet.draw, omnivore, popup, ensureFID,
-//      validarTamanioDoc, processLoadedLayers, grupos por autor,
-//      normalizeArea, concesiones SIRGAS, detección de storage bloqueado
+// Cambios respecto a v5.0:
+//   ✅ Agregado manejo de Email Link en index.js (isSignInWithEmailLink / signInWithEmailLink)
+//      para completar el login cuando Firebase redirige a index.html con oobCode en la URL
 // =============================================================================
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
-import {
-  getAuth, onAuthStateChanged, signOut,
-  isSignInWithEmailLink, signInWithEmailLink   // ← AGREGAR ESTAS DOS
-} from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
 import {
   getFirestore, collection, setDoc, onSnapshot, doc,
   serverTimestamp, query, limit
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 import {
-  getAuth, onAuthStateChanged, signOut
+  getAuth, onAuthStateChanged, signOut,
+  isSignInWithEmailLink, signInWithEmailLink
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
 
 // =============================================================================
@@ -51,13 +42,17 @@ const auth = getAuth(app);
 
 // =============================================================================
 // 0b) COMPLETAR EMAIL LINK si la URL contiene oobCode (viene del correo)
+//     Firebase redirige a index.html con ?apiKey=...&oobCode=...&mode=signIn
+//     Hay que interceptarlo aquí para completar el signIn
 // =============================================================================
 (async () => {
   if (!isSignInWithEmailLink(auth, window.location.href)) return;
 
+  // Recuperar email guardado por acceso.js (sin volver a pedirlo)
   let email = '';
   try { email = localStorage.getItem('demo2:emailForSignIn') || ''; } catch {}
   if (!email) {
+    // Fallback: solo si localStorage está bloqueado
     email = window.prompt('Confirma tu correo para completar el acceso:') || '';
   }
   email = email.trim();
@@ -65,28 +60,17 @@ const auth = getAuth(app);
 
   try {
     await signInWithEmailLink(auth, email, window.location.href);
+    // Limpiar email guardado
     try { localStorage.removeItem('demo2:emailForSignIn'); } catch {}
-    // Limpiar oobCode/apiKey de la URL sin recargar
+    // Limpiar oobCode/apiKey/mode/lang de la URL sin recargar la página
     const clean = new URL(window.location.href);
-    ['apiKey','oobCode','mode','lang'].forEach(k => clean.searchParams.delete(k));
+    ['apiKey', 'oobCode', 'mode', 'lang'].forEach(k => clean.searchParams.delete(k));
     window.history.replaceState(null, '', clean.toString());
   } catch (err) {
     console.error('❌ signInWithEmailLink:', err);
     alert('Error al completar el acceso: ' + (err?.message ?? err));
   }
 })();
-
-Visualmente, en tu archivo queda así:
-```
-// 0) FIREBASE
-...
-const auth = getAuth(app);
-
-// 0b) COMPLETAR EMAIL LINK   ← PEGAR AQUÍ
-(async () => { ... })();
-
-// 1) DETECCIÓN DE ALMACENAMIENTO BLOQUEADO
-...
 
 // =============================================================================
 // 1) DETECCIÓN DE ALMACENAMIENTO BLOQUEADO
@@ -291,14 +275,12 @@ function esEditor() {
 // 9) setDrawingEnabled — activa / desactiva controles de edición
 // =============================================================================
 function setDrawingEnabled(enabled) {
-  // Controles internos de Leaflet.draw
   const dc = document.querySelector('.leaflet-draw');
   if (dc) {
     dc.style.pointerEvents = enabled ? 'auto'  : 'none';
     dc.style.opacity       = enabled ? '1'     : '0.35';
     dc.title               = enabled ? '' : 'Inicia sesión para editar';
   }
-  // Botón KML
   const kmlLabel = document.getElementById('kmlLabel');
   const kmlInput = document.getElementById('kmlInput');
   if (kmlLabel) {
@@ -640,7 +622,6 @@ document.getElementById('saveBtn').onclick = async () => {
 //     Logout: signOut() → vuelve a modo VISOR automáticamente
 // =============================================================================
 document.getElementById('loginBtn')?.addEventListener('click', () => {
-  // Construir URL de la página de acceso preservando los parámetros del mapa
   const MAP_KEYS  = ['area', 'lat', 'lng', 'zoom'];
   const params    = new URLSearchParams();
   for (const k of MAP_KEYS) {
