@@ -211,22 +211,24 @@ form?.addEventListener('submit', async (ev) => {
     disableForm(true);
     setStatus('Enviando enlace…', 'warn');
 
-    // Guarda email para completar sin re-pedirlo
     try { localStorage.setItem(LS_EMAIL_KEY, email); } catch {}
 
-    // Genera el magic link con Firebase
-    const acs = buildActionCodeSettings();
-    await sendSignInLinkToEmail(auth, email, acs);
-    
-    // Obtén el link generado y envíalo via Worker + SendGrid
-    const actionLink = buildActionCodeUrl();
-    await fetch('https://gis-pucobre-mail.propiedadsuperficial.workers.dev', {
+    const continueUrl = buildActionCodeUrl();
+
+    const res = await fetch('https://gis-pucobre-mail.propiedadsuperficial.workers.dev', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, link: actionLink })
+      body: JSON.stringify({ email, continueUrl })
     });
 
-    setStatus('Enlace enviado. Revisa tu correo y ábrelo desde este navegador.', 'ok');
+    const data = await res.json();
+
+    if (data.ok) {
+      setStatus('Enlace enviado. Revisa tu correo y ábrelo desde este navegador.', 'ok');
+    } else {
+      throw new Error(JSON.stringify(data.error));
+    }
+
   } catch (err) {
     console.error(err);
     setStatus(describeAuthError(err), 'err');
