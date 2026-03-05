@@ -27,113 +27,65 @@
       border: 1px solid #21262d;
     }
 
-    .logo {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 24px;
-    }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+    .logo-dot { width: 12px; height: 12px; border-radius: 50%; background: #27ae60; }
+    .logo span { font-weight: 700; font-size: 1.1rem; color: #e6edf3; }
 
-    .logo-dot {
-      width: 12px; height: 12px;
-      border-radius: 50%;
-      background: #27ae60;
-    }
+    h1 { font-size: 1.5rem; font-weight: 700; color: #e6edf3; margin-bottom: 8px; }
 
-    .logo span {
-      font-weight: 700;
-      font-size: 1.1rem;
-      color: #e6edf3;
-    }
-
-    h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: #e6edf3;
-      margin-bottom: 8px;
-    }
-
-    .subtitle {
-      font-size: 0.9rem;
-      color: #8b949e;
-      margin-bottom: 24px;
-      line-height: 1.5;
-    }
+    .subtitle { font-size: 0.9rem; color: #8b949e; margin-bottom: 24px; line-height: 1.5; }
 
     #ctx-pill {
       display: inline-block;
-      background: #1c2330;
-      color: #58a6ff;
-      border: 1px solid #21262d;
-      border-radius: 6px;
-      padding: 4px 10px;
-      font-size: 11px;
-      font-family: monospace;
-      margin-bottom: 20px;
+      background: #1c2330; color: #58a6ff;
+      border: 1px solid #21262d; border-radius: 6px;
+      padding: 4px 10px; font-size: 11px; font-family: monospace; margin-bottom: 20px;
     }
 
-    label {
-      display: block;
-      font-size: 0.85rem;
-      color: #8b949e;
-      margin-bottom: 6px;
-    }
+    label { display: block; font-size: 0.85rem; color: #8b949e; margin-bottom: 6px; }
 
-    input[type="email"] {
-      width: 100%;
-      padding: 12px 14px;
-      border-radius: 8px;
-      border: 1px solid #2b3445;
-      background: #0f1420;
-      color: #e6edf3;
-      font-size: 0.95rem;
-      transition: border-color 0.2s;
-      outline: none;
+    input[type="email"], input[type="text"] {
+      width: 100%; padding: 12px 14px; border-radius: 8px;
+      border: 1px solid #2b3445; background: #0f1420; color: #e6edf3;
+      font-size: 0.95rem; transition: border-color 0.2s; outline: none; margin-bottom: 16px;
     }
+    input[type="email"]:focus, input[type="text"]:focus { border-color: #27ae60; }
+    input:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    input[type="email"]:focus {
-      border-color: #27ae60;
-    }
-
-    button[type="submit"] {
-      margin-top: 14px;
-      padding: 13px;
-      width: 100%;
-      border: 0;
-      border-radius: 8px;
-      background: #27ae60;
-      color: #fff;
-      font-weight: 700;
-      font-size: 0.95rem;
-      cursor: pointer;
+    .btn-primary {
+      margin-top: 4px; padding: 13px; width: 100%; border: 0;
+      border-radius: 8px; background: #27ae60; color: #fff;
+      font-weight: 700; font-size: 0.95rem; cursor: pointer;
       transition: opacity 0.2s, transform 0.1s;
     }
+    .btn-primary:hover:not(:disabled) { opacity: 0.9; }
+    .btn-primary:active:not(:disabled) { transform: translateY(1px); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    button[type="submit"]:hover:not(:disabled) { opacity: 0.9; }
-    button[type="submit"]:active:not(:disabled) { transform: translateY(1px); }
-
-    button[type="submit"]:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
+    .btn-secondary {
+      margin-top: 10px; padding: 10px; width: 100%;
+      border: 1px solid #2b3445; border-radius: 8px; background: transparent;
+      color: #8b949e; font-size: 0.85rem; cursor: pointer; transition: opacity 0.2s;
     }
+    .btn-secondary:hover { opacity: 0.7; }
 
-    .status {
-      margin-top: 14px;
-      font-size: 0.875rem;
-      min-height: 20px;
-      line-height: 1.5;
-    }
-
+    .status { margin-top: 14px; font-size: 0.875rem; min-height: 20px; line-height: 1.5; }
     .ok   { color: #3fb950; }
     .warn { color: #d29922; }
     .err  { color: #f85149; }
 
-    .footer-note {
-      margin-top: 24px;
-      font-size: 0.78rem;
-      color: #4b5563;
-      text-align: center;
+    #step-otp { display: none; }
+
+    .otp-hint {
+      font-size: 0.82rem; color: #58a6ff; margin-bottom: 16px;
+      background: #1c2330; border: 1px solid #21262d;
+      border-radius: 6px; padding: 10px 12px; line-height: 1.5;
     }
+    .otp-hint strong { color: #e6edf3; }
+
+    #recaptcha-container { display: none; }
+
+    .footer-note { margin-top: 24px; font-size: 0.78rem; color: #4b5563; text-align: center; }
   </style>
 </head>
 
@@ -145,30 +97,36 @@
     </div>
 
     <h1>Acceso al sistema</h1>
-    <p class="subtitle">
-      Recibirás un enlace de acceso en tu correo.<br>
-      No necesitas contraseña.
-    </p>
 
-    <div id="ctx-pill">cargando parámetros…</div>
-
-    <form id="form-acceso">
+    <!-- PASO 1: correo -->
+    <div id="step-email">
+      <p class="subtitle">
+        Ingresa tu correo corporativo.<br>
+        Recibirás un código SMS para verificar tu identidad.
+      </p>
+      <div id="ctx-pill">cargando parámetros…</div>
       <label for="email">Correo corporativo</label>
-      <input
-        id="email"
-        type="email"
-        placeholder="usuario@pucobre.cl"
-        required
-        autocomplete="email"
-      />
+      <input id="email" type="email" placeholder="usuario@pucobre.cl" required autocomplete="email" />
+      <button id="btn-verificar" class="btn-primary">Verificar correo</button>
+      <div id="status-email" class="status"></div>
+    </div>
 
-      <button id="btn-enviar" type="submit">Enviar enlace de acceso</button>
-      <div id="status" class="status"></div>
-    </form>
+    <!-- PASO 2: código SMS OTP -->
+    <div id="step-otp">
+      <p class="subtitle">Verificación SMS</p>
+      <div class="otp-hint">
+        Se envió un código de 6 dígitos al celular registrado de <strong id="otp-nombre"></strong>.
+      </div>
+      <label for="otp-code">Código de verificación</label>
+      <input id="otp-code" type="text" placeholder="123456" maxlength="6" inputmode="numeric" autocomplete="one-time-code" />
+      <button id="btn-ingresar" class="btn-primary">Ingresar al sistema</button>
+      <button id="btn-volver"   class="btn-secondary">← Volver</button>
+      <div id="status-otp" class="status"></div>
+    </div>
 
-    <p class="footer-note">
-      Solo personal autorizado · Acceso restringido
-    </p>
+    <div id="recaptcha-container"></div>
+
+    <p class="footer-note">Solo personal autorizado · Acceso restringido</p>
   </main>
 
   <script type="module" src="../js/acceso.js"></script>
