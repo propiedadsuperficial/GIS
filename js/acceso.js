@@ -1,20 +1,26 @@
-// demo2/js/acceso.js
-// Flujo de autenticación con "Email Link (passwordless)" usando Firebase v10 modular (ESM por CDN).
-// Requisitos:
-// - Preservar SIEMPRE los parámetros: area, lat, lng, zoom.
-// - Persistencia local (browserLocalPersistence).
-// - Redirigir a PROD al finalizar, sin oobCode/mode/apiKey/lang en la URL.
-// - Si ya hay sesión en la página de acceso, redirigir a PROD con los mismos parámetros.
+// =============================================================================
+// js/acceso.js — GIS Pucobre v6
+// Pipeline: Email → Firestore (Usuarios_GIS) → Firebase Phone Auth SMS OTP → Acceso
+//
+// Flujo:
+//   1. Usuario ingresa correo @pucobre.cl
+//   2. Se verifica en Firestore colección "Usuarios_GIS" (doc ID = email)
+//      → habilitado: true  → continúa
+//      → no existe / habilitado: false → rechazado
+//   3. Firebase Phone Auth envía SMS OTP al celular registrado en Firestore
+//   4. Usuario ingresa código → signInWithPhoneNumber → acceso
+//   5. Se registra log de acceso (IP + timestamp) en Firestore colección "logs_acceso"
+//   6. Redirige a PROD con los parámetros originales del mapa
+// =============================================================================
 
 const PROD_BASE  = 'https://propiedadsuperficial.github.io/GIS/';
 const ACCESO_URL = 'https://propiedadsuperficial.github.io/GIS/acceso/acceso.html';
 
-// --- Utilidades de URL / parámetros ---
+// --- Parámetros del mapa ---
 const MAP_KEYS = ['area', 'lat', 'lng', 'zoom'];
 
 function getSearchParams(url = window.location.href) {
-  const u = new URL(url);
-  return u.searchParams;
+  return new URL(url).searchParams;
 }
 
 function pickMapParams(sp = getSearchParams()) {
@@ -38,16 +44,16 @@ function setCtxPill() {
   pill.textContent = p.toString() || 'sin parámetros';
 }
 
-// Persistencia simple de parámetros por si hay navegación intermedia
-const MAP_PARAMS_KEY = 'demo2:lastMapParams';
-function saveMapParamsLocally(params) {
+// Persistencia de parámetros
+const MAP_PARAMS_KEY = 'gis:lastMapParams';
+function saveMapParams(params) {
   try { localStorage.setItem(MAP_PARAMS_KEY, params.toString()); } catch {}
 }
-function loadMapParamsLocally() {
+function loadMapParams() {
   try {
     const raw = localStorage.getItem(MAP_PARAMS_KEY);
     if (!raw) return null;
-    const src = new URLSearchParams(raw);
+    const src  = new URLSearchParams(raw);
     const pure = new URLSearchParams();
     for (const k of MAP_KEYS) {
       const v = src.get(k);
@@ -57,185 +63,259 @@ function loadMapParamsLocally() {
   } catch { return null; }
 }
 
-// --- Firebase (v10, ES Modules por CDN) ---
+// --- Firebase (v10, ES Modules) ---
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
 import {
-  getAuth, isSignInWithEmailLink, signInWithEmailLink, sendSignInLinkToEmail,
+  getAuth, RecaptchaVerifier, signInWithPhoneNumber,
   setPersistence, browserLocalPersistence, onAuthStateChanged
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
+import {
+  getFirestore, doc, getDoc, collection, addDoc, serverTimestamp
+} from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyB3kW9ep7iOKDp87T2-er5-CuZKerA4puY",
-  authDomain: "gis-pucobre.firebaseapp.com",
-  projectId: "gis-pucobre",
-  storageBucket: "gis-pucobre.appspot.com",    // ← unificado con index.js
+  apiKey:            "AIzaSyB3kW9ep7iOKDp87T2-er5-CuZKerA4puY",
+  authDomain:        "gis-pucobre.firebaseapp.com",
+  projectId:         "gis-pucobre",
+  storageBucket:     "gis-pucobre.appspot.com",
   messagingSenderId: "654550355942",
-  appId: "1:654550355942:web:06a8bd8014a0faa86f5027",
-  measurementId: "G-2CSXPQN2SC"
+  appId:             "1:654550355942:web:06a8bd8014a0faa86f5027",
+  measurementId:     "G-2CSXPQN2SC"
 };
 
-const app = initializeApp(firebaseConfig);
+const app  = initializeApp(firebaseConfig);
 const auth = getAuth(app);
+const db   = getFirestore(app);
 
-// Persistencia local (requisito)
 await setPersistence(auth, browserLocalPersistence);
 
-// --- Estado UI ---
-const form = document.getElementById('form-acceso');
-const emailInput = document.getElementById('email');
-const btnEnviar = document.getElementById('btn-enviar');
-const statusEl = document.getElementById('status');
+// --- Elementos UI ---
+const stepEmail   = document.getElementById('step-email');
+const stepOtp     = document.getElementById('step-otp');
+const emailInput  = document.getElementById('email');
+const otpInput    = document.getElementById('otp-code');
+const btnVerificar = document.getElementById('btn-verificar');
+const btnIngresar  = document.getElementById('btn-ingresar');
+const btnVolver    = document.getElementById('btn-volver');
+const statusEmail  = document.getElementById('status-email');
+const statusOtp    = document.getElementById('status-otp');
+const otpNombre    = document.getElementById('otp-nombre');
 
-function setStatus(msg, cls = '') {
-  if (!statusEl) return;
-  statusEl.className = `status ${cls}`.trim();
-  statusEl.textContent = msg;
-}
-function disableForm(disabled) {
-  if (btnEnviar) btnEnviar.disabled = disabled;
-  if (emailInput) emailInput.readOnly = disabled;
-}
-
-// Restringe acceso a correos @pucobre.cl (la seguridad definitiva va en Reglas Firestore)
-// Cambiar a false solo para pruebas con correos externos
-const REQUIRE_PUCOBRE_DOMAIN = true;
-function isValidCorporate(email) {
-  if (!REQUIRE_PUCOBRE_DOMAIN) return true;
-  return /@pucobre\.cl$/i.test(String(email || '').trim());
+function setStatus(el, msg, cls = '') {
+  if (!el) return;
+  el.className = `status ${cls}`.trim();
+  el.textContent = msg;
 }
 
-// --- Redirige a PROD si ya hay sesión activa en la página de acceso ---
+function disableStep1(disabled) {
+  if (btnVerificar) btnVerificar.disabled = disabled;
+  if (emailInput)   emailInput.readOnly   = disabled;
+}
+
+function disableStep2(disabled) {
+  if (btnIngresar) btnIngresar.disabled = disabled;
+  if (otpInput)    otpInput.readOnly    = disabled;
+}
+
+// --- Si ya hay sesión activa, redirigir directo ---
 onAuthStateChanged(auth, (user) => {
-  const isOnAcceso = window.location.pathname.endsWith('/acceso.html');
-  if (user && isOnAcceso) {
+  const isOnAcceso = window.location.pathname.includes('/acceso.html');
+  if (user && !user.isAnonymous && isOnAcceso) {
     const mapParams = pickMapParams();
-    const paramsForRedirect = (mapParams.toString() ? mapParams : (loadMapParamsLocally() || new URLSearchParams()));
-    const target = `${PROD_BASE}${paramsToString(paramsForRedirect)}`;
+    const target = `${PROD_BASE}${paramsToString(
+      mapParams.toString() ? mapParams : (loadMapParams() ?? new URLSearchParams())
+    )}`;
     window.location.replace(target);
   }
 });
 
-// --- Completar sign-in si el email-link abre en /acceso/acceso.html ---
-const LS_EMAIL_KEY = 'demo2:emailForSignIn';
-async function maybeCompleteEmailLink() {
-  const href = window.location.href;
-  if (!isSignInWithEmailLink(auth, href)) return false;
-
-  // Recupera o solicita el correo
-  let email = '';
-  try { email = localStorage.getItem(LS_EMAIL_KEY) || ''; } catch {}
-  if (!email) {
-    email = window.prompt('Confirma tu correo para completar el acceso:') || '';
-  }
-  email = email.trim();
-  if (!email) {
-    setStatus('No se pudo completar el acceso: correo no proporcionado.', 'err');
-    return true;
-  }
-
-  try {
-    disableForm(true);
-    setStatus('Completando acceso…', 'warn');
-
-    await signInWithEmailLink(auth, email, href);
-
-    // Limpieza de correo almacenado
-    try { localStorage.removeItem(LS_EMAIL_KEY); } catch {}
-
-    // Conserva parámetros del mapa y redirige a PROD sin parámetros de auth
-    const usp = getSearchParams(href);
-    const mapParams = pickMapParams(usp);
-    if (mapParams.toString()) saveMapParamsLocally(mapParams);
-
-    const target = `${PROD_BASE}${paramsToString(mapParams)}`;
-    setStatus('Acceso completado. Redirigiendo…', 'ok');
-    window.location.replace(target);
-    return true;
-  } catch (err) {
-    console.error(err);
-    setStatus(describeAuthError(err), 'err');
-    disableForm(false);
-    return true;
-  }
+// --- reCAPTCHA invisible ---
+let recaptchaVerifier = null;
+function initRecaptcha() {
+  if (recaptchaVerifier) return;
+  recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
+    size: 'invisible',
+    callback: () => {}
+  });
 }
 
-// --- Envío del email-link desde la página de acceso ---
-function buildActionCodeUrl() {
-  // El enlace debe regresar a PRODUCCIÓN con los mismos parámetros
-  const params = pickMapParams();
-  if (params.toString()) saveMapParamsLocally(params);
-  return `${PROD_BASE}${paramsToString(params)}`;
-}
+// --- Variables de estado ---
+let confirmationResult = null;
+let usuarioData        = null;
+let emailActual        = '';
 
-function buildActionCodeSettings() {
-  return {
-    url: buildActionCodeUrl(),
-    handleCodeInApp: true
-  };
-}
-
-function describeAuthError(err) {
-  const code = (err && err.code) || '';
-  if (code.includes('operation-not-allowed')) {
-    return 'Email Link no está habilitado en Firebase Authentication (operation-not-allowed). Activa "Email link (passwordless)".';
-  }
-  if (code.includes('invalid-continue-uri')) {
-    return 'La URL de retorno no está autorizada (invalid-continue-uri). Agrega el dominio de GitHub Pages en Authentication > Settings > Authorized domains.';
-  }
-  if (code.includes('invalid-email')) {
-    return 'Correo inválido. Verifica el formato.';
-  }
-  if (code.includes('too-many-requests')) {
-    return 'Demasiados intentos. Espera unos minutos y vuelve a intentar.';
-  }
-  return `Error de autenticación: ${err?.message || err}`;
-}
-
-// Submit del formulario
-form?.addEventListener('submit', async (ev) => {
-  ev.preventDefault();
-  const email = (emailInput?.value || '').trim();
+// =============================================================================
+// PASO 1 — Verificar correo en Firestore
+// =============================================================================
+btnVerificar?.addEventListener('click', async () => {
+  const email = (emailInput?.value || '').trim().toLowerCase();
 
   if (!email) {
-    setStatus('Ingresa tu correo para enviar el enlace.', 'warn');
-    emailInput?.focus();
-    return;
-  }
-  if (!isValidCorporate(email)) {
-    setStatus('Este acceso requiere correo @pucobre.cl', 'warn');
+    setStatus(statusEmail, 'Ingresa tu correo corporativo.', 'warn');
     emailInput?.focus();
     return;
   }
 
+  if (!/@pucobre\.cl$/i.test(email)) {
+    setStatus(statusEmail, 'Este acceso requiere correo @pucobre.cl', 'warn');
+    emailInput?.focus();
+    return;
+  }
+
+  disableStep1(true);
+  setStatus(statusEmail, 'Verificando acceso…', 'warn');
+
   try {
-    disableForm(true);
-    setStatus('Enviando enlace…', 'warn');
+    // Consultar Firestore: Usuarios_GIS/{email}
+    const userRef  = doc(db, 'Usuarios_GIS', email);
+    const userSnap = await getDoc(userRef);
 
-    try { localStorage.setItem(LS_EMAIL_KEY, email); } catch {}
-
-    const continueUrl = buildActionCodeUrl();
-
-    const res = await fetch('https://gis-pucobre-mail.propiedadsuperficial.workers.dev', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, continueUrl })
-    });
-
-    const data = await res.json();
-
-    if (data.ok) {
-      setStatus('Enlace enviado. Revisa tu correo y ábrelo desde este navegador.', 'ok');
-    } else {
-      throw new Error(JSON.stringify(data.error));
+    if (!userSnap.exists()) {
+      setStatus(statusEmail, 'Correo no registrado en el sistema. Contacta al administrador.', 'err');
+      disableStep1(false);
+      return;
     }
 
+    const data = userSnap.data();
+
+    if (!data.habilitado) {
+      setStatus(statusEmail, 'Tu acceso está deshabilitado. Contacta al administrador.', 'err');
+      disableStep1(false);
+      return;
+    }
+
+    if (!data.celular) {
+      setStatus(statusEmail, 'No hay celular registrado para tu cuenta. Contacta al administrador.', 'err');
+      disableStep1(false);
+      return;
+    }
+
+    // Verificar que el proyecto en la URL esté autorizado para este usuario
+    const areaParam = pickMapParams().get('area');
+    if (areaParam && data.proyectos && Array.isArray(data.proyectos)) {
+      const tieneAcceso = data.proyectos.some(p => p.toLowerCase() === areaParam.toLowerCase());
+      if (!tieneAcceso) {
+        setStatus(statusEmail, `No tienes acceso al proyecto "${areaParam}". Contacta al administrador.`, 'err');
+        disableStep1(false);
+        return;
+      }
+    }
+
+    // Guardar datos para el paso 2
+    emailActual  = email;
+    usuarioData  = data;
+
+    // Enviar SMS OTP
+    initRecaptcha();
+    setStatus(statusEmail, 'Enviando código SMS…', 'warn');
+
+    confirmationResult = await signInWithPhoneNumber(auth, data.celular, recaptchaVerifier);
+
+    // Pasar a paso 2
+    if (otpNombre) otpNombre.textContent = data.nombre || email;
+    saveMapParams(pickMapParams());
+
+    stepEmail.style.display = 'none';
+    stepOtp.style.display   = 'block';
+    setStatus(statusOtp, '', '');
+    otpInput?.focus();
+
   } catch (err) {
-    console.error(err);
-    setStatus(describeAuthError(err), 'err');
-    disableForm(false);
+    console.error('Error paso 1:', err);
+    setStatus(statusEmail, describeError(err), 'err');
+    disableStep1(false);
+    // Resetear reCAPTCHA si hubo error de envío
+    if (recaptchaVerifier) {
+      try { recaptchaVerifier.clear(); } catch {}
+      recaptchaVerifier = null;
+    }
   }
 });
 
-// Inicialización de UI y, si aplica, completar el email-link
+// =============================================================================
+// PASO 2 — Verificar código OTP e iniciar sesión
+// =============================================================================
+btnIngresar?.addEventListener('click', async () => {
+  const code = (otpInput?.value || '').trim();
+
+  if (!code || code.length < 6) {
+    setStatus(statusOtp, 'Ingresa el código de 6 dígitos recibido por SMS.', 'warn');
+    otpInput?.focus();
+    return;
+  }
+
+  disableStep2(true);
+  setStatus(statusOtp, 'Verificando código…', 'warn');
+
+  try {
+    await confirmationResult.confirm(code);
+
+    // Registrar log de acceso en Firestore
+    try {
+      await addDoc(collection(db, 'logs_acceso'), {
+        email:     emailActual,
+        nombre:    usuarioData?.nombre ?? '',
+        area:      pickMapParams().get('area') ?? 'general',
+        timestamp: serverTimestamp(),
+        userAgent: navigator.userAgent.slice(0, 200)
+      });
+    } catch (logErr) {
+      console.warn('No se pudo registrar el log de acceso:', logErr);
+    }
+
+    // Redirigir a PROD con parámetros del mapa
+    const mapParams = pickMapParams();
+    const target = `${PROD_BASE}${paramsToString(
+      mapParams.toString() ? mapParams : (loadMapParams() ?? new URLSearchParams())
+    )}`;
+
+    setStatus(statusOtp, '✅ Acceso verificado. Ingresando…', 'ok');
+    window.location.replace(target);
+
+  } catch (err) {
+    console.error('Error paso 2:', err);
+    setStatus(statusOtp, describeError(err), 'err');
+    disableStep2(false);
+  }
+});
+
+// Permitir confirmar con Enter en el campo OTP
+otpInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') btnIngresar?.click();
+});
+
+// --- Botón volver ---
+btnVolver?.addEventListener('click', () => {
+  stepOtp.style.display   = 'none';
+  stepEmail.style.display = 'block';
+  setStatus(statusEmail, '', '');
+  disableStep1(false);
+  confirmationResult = null;
+  if (otpInput) otpInput.value = '';
+  // Resetear reCAPTCHA para permitir reintento
+  if (recaptchaVerifier) {
+    try { recaptchaVerifier.clear(); } catch {}
+    recaptchaVerifier = null;
+  }
+});
+
+// --- Descripción de errores ---
+function describeError(err) {
+  const code = err?.code || '';
+  if (code === 'auth/invalid-phone-number')
+    return 'El número de celular registrado no es válido. Contacta al administrador.';
+  if (code === 'auth/invalid-verification-code')
+    return 'Código incorrecto. Verifica el SMS e intenta de nuevo.';
+  if (code === 'auth/code-expired')
+    return 'El código expiró. Vuelve al paso anterior para solicitar uno nuevo.';
+  if (code === 'auth/too-many-requests')
+    return 'Demasiados intentos. Espera unos minutos e intenta de nuevo.';
+  if (code === 'auth/quota-exceeded')
+    return 'Cuota de SMS excedida. Intenta más tarde.';
+  if (code === 'auth/captcha-check-failed')
+    return 'Error de verificación reCAPTCHA. Recarga la página e intenta de nuevo.';
+  return `Error: ${err?.message || err}`;
+}
+
+// --- Inicialización ---
 setCtxPill();
-await maybeCompleteEmailLink();

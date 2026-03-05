@@ -1,16 +1,13 @@
 // =============================================================================
 // js/index.js — GIS Pucobre
-// Versión: 5.1 — Autenticación Email Link (passwordless)
+// Versión: 6.0 — Autenticación Email + SMS OTP (Firebase Phone Auth)
 //
 // Flujo de identidad:
 //   VISOR  → sin sesión, lectura pública Firestore
-//   EDITOR → sesión activa via Email Link (acceso/acceso.html)
-//            el usuario ingresa su correo @pucobre.cl, recibe un enlace,
-//            hace clic y queda autenticado — sin contraseña, sin Google
-//
-// Cambios respecto a v5.0:
-//   ✅ Agregado manejo de Email Link en index.js (isSignInWithEmailLink / signInWithEmailLink)
-//      para completar el login cuando Firebase redirige a index.html con oobCode en la URL
+//   EDITOR → sesión activa via Phone Auth (acceso/acceso.html)
+//            1. Correo verificado en Firestore (Usuarios_GIS)
+//            2. SMS OTP al celular registrado
+//            3. Acceso al proyecto autorizado
 // =============================================================================
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
@@ -19,8 +16,7 @@ import {
   serverTimestamp, query, limit
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 import {
-  getAuth, onAuthStateChanged, signOut,
-  isSignInWithEmailLink, signInWithEmailLink
+  getAuth, onAuthStateChanged, signOut
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
 
 // =============================================================================
@@ -41,35 +37,15 @@ const db   = getFirestore(app);
 const auth = getAuth(app);
 
 // =============================================================================
-// 0b) COMPLETAR EMAIL LINK si la URL contiene oobCode (viene del correo)
-//     Firebase redirige a index.html con ?apiKey=...&oobCode=...&mode=signIn
-//     Hay que interceptarlo aquí para completar el signIn
+// 0b) Limpiar parámetros de auth residuales en la URL (compatibilidad)
 // =============================================================================
-(async () => {
-  if (!isSignInWithEmailLink(auth, window.location.href)) return;
-
-  // Recuperar email guardado por acceso.js (sin volver a pedirlo)
-  let email = '';
-  try { email = localStorage.getItem('demo2:emailForSignIn') || ''; } catch {}
-  if (!email) {
-    // Fallback: solo si localStorage está bloqueado
-    email = window.prompt('Confirma tu correo para completar el acceso:') || '';
-  }
-  email = email.trim();
-  if (!email) return;
-
-  try {
-    await signInWithEmailLink(auth, email, window.location.href);
-    // Limpiar email guardado
-    try { localStorage.removeItem('demo2:emailForSignIn'); } catch {}
-    // Limpiar oobCode/apiKey/mode/lang de la URL sin recargar la página
-    const clean = new URL(window.location.href);
-    ['apiKey', 'oobCode', 'mode', 'lang'].forEach(k => clean.searchParams.delete(k));
-    window.history.replaceState(null, '', clean.toString());
-  } catch (err) {
-    console.error('❌ signInWithEmailLink:', err);
-    alert('Error al completar el acceso: ' + (err?.message ?? err));
-  }
+(function limpiarURLAuth() {
+  const clean = new URL(window.location.href);
+  let changed = false;
+  ['apiKey', 'oobCode', 'mode', 'lang'].forEach(k => {
+    if (clean.searchParams.has(k)) { clean.searchParams.delete(k); changed = true; }
+  });
+  if (changed) window.history.replaceState(null, '', clean.toString());
 })();
 
 // =============================================================================
