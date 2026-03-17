@@ -274,7 +274,9 @@ function setDrawingEnabled(enabled) {
 function markDirty(layer, meta = {}) {
   try {
     const gj  = layer.toGeoJSON();
-    const fid = ensureFID(gj) ?? newFID();
+    // Priorizar fid guardado en options (layers cargados desde Firestore)
+    const fid = layer.options.__fid ?? ensureFID(gj) ?? newFID();
+    gj.properties.__fid = fid;
     pending.set(fid, { layer, meta });
   } catch (e) { console.warn('markDirty:', e); }
   actualizarBoton();
@@ -447,6 +449,11 @@ function processLoadedLayers(layerGroup, fileName) {
 async function initRealtime() {
   if (unsubscribeRT) { try { unsubscribeRT(); } catch {} unsubscribeRT = null; }
 
+  // Limpiar localDrafts de layers previos de Firestore (no los borradores nuevos)
+  localDrafts.eachLayer(l => {
+    if (l.options.__fromFirestore) localDrafts.removeLayer(l);
+  });
+
   console.log('🔄 Listener en:', geomCollection);
 
   unsubscribeRT = onSnapshot(
@@ -455,12 +462,21 @@ async function initRealtime() {
       const fromCache = snap.metadata.fromCache;
       console.log(fromCache ? '🔌 cache:' : '☁️ servidor:', snap.size, 'docs');
 
-      // Limpiar overlays previos
+      // Limpiar overlays previos (solo los ajenos, no localDrafts)
       for (const a in gruposPorAutor) {
         try { map.removeLayer(gruposPorAutor[a]); }          catch {}
         try { layerControl.removeLayer(gruposPorAutor[a]); } catch {}
         delete gruposPorAutor[a];
       }
+
+      // Limpiar layers propios previos de localDrafts (solo los de Firestore)
+      localDrafts.eachLayer(l => {
+        if (l.options.__fromFirestore) localDrafts.removeLayer(l);
+      });
+
+      // Limpiar también el overlay de mis capas si existía
+      try { layerControl.removeLayer(localDrafts); } catch {}
+
       docMap.clear();
       ownerByFid.clear();
 
@@ -499,20 +515,41 @@ async function initRealtime() {
               pointToLayer: (_, ll) => L.marker(ll),
               style: { color: esMio ? '#27ae60' : '#3498db', weight: 2, fillOpacity: 0.15 }
             }).eachLayer(l => {
-              l.options.customMetadata = { autor };
+              l.options.customMetadata = { autor, comentario: item.comentario };
+              l.options.__fromFirestore = true;   // marca para identificarlos
+              l.options.__fid           = fid;    // preservar fid original
+
               l.bindPopup(generarTablaPopup(
                 item.comentario ?? '(sin nombre)', autor, fecha, gj.properties ?? {}
               ));
-              l.addTo(grupo);
+
+              if (esMio) {
+                // Layers propios → localDrafts (editables)
+                localDrafts.addLayer(l);
+              } else {
+                // Layers ajenos → solo visualización
+                grupo.addLayer(l);
+              }
             });
+
           } catch (err) {
             console.error('❌ doc', item.id, ':', err.message);
           }
         });
 
-        gruposPorAutor[autor] = grupo;
-        grupo.addTo(map);
-        layerControl.addOverlay(grupo, label);
+        if (esMio) {
+          // Registrar localDrafts en el control de capas con label del usuario
+          layerControl.addOverlay(localDrafts, label);
+        } else {
+          gruposPorAutor[autor] = grupo;
+          grupo.addTo(map);
+          layerControl.addOverlay(grupo, label);
+        }
+      }
+
+      // Si no hay geometrías propias, igual registrar localDrafts en el control
+      if (myEmail && !byAutor[myEmail]) {
+        layerControl.addOverlay(localDrafts, `<b>⭐ MIS CAPAS (0)</b>`);
       }
 
       updateStatus(snap.size, myEmail ? (byAutor[myEmail]?.length ?? 0) : 0, null, fromCache);
