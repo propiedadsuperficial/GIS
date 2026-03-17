@@ -1,6 +1,6 @@
 // =============================================================================
 // js/index.js — GIS Pucobre
-// Versión: 6.0 — Autenticación Email + SMS OTP (Firebase Phone Auth)
+// Versión: 6.1 — Edición/borrado de geometrías propias + superusuario
 //
 // Flujo de identidad:
 //   VISOR  → sin sesión, lectura pública Firestore
@@ -8,11 +8,17 @@
 //            1. Correo verificado en Firestore (Usuarios_GIS)
 //            2. SMS OTP al celular registrado
 //            3. Acceso al proyecto autorizado
+//
+// Cambios v6.1:
+//   - initRealtime: layers propios van a localDrafts (editables con Leaflet.draw)
+//   - markDirty: respeta __fid original de layers cargados desde Firestore
+//   - DELETED: elimina documentos de Firestore al borrar layers propios
+//   - Reglas Firestore: isAutor() || isSuperUser() para update/delete
 // =============================================================================
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
 import {
-  getFirestore, collection, setDoc, onSnapshot, doc,
+  getFirestore, collection, setDoc, deleteDoc, onSnapshot, doc,
   serverTimestamp, query, limit
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 import {
@@ -228,15 +234,50 @@ map.on(L.Draw.Event.CREATED, (e) => {
   markDirty(layer, { comentario, autor, archivo: 'Web' });
 });
 
-map.on(L.Draw.Event.EDITED,  (e) => {
+map.on(L.Draw.Event.EDITED, (e) => {
   if (!esEditor()) return;
   e.layers.eachLayer(l => markDirty(l, l.options.customMetadata ?? {}));
 });
 
-map.on(L.Draw.Event.DELETED, (e) => {
+// ── DELETED: elimina de Firestore los layers que venían de allí ──────────────
+map.on(L.Draw.Event.DELETED, async (e) => {
+  if (!esEditor()) return;
+
+  const deleteOps = [];
+
   e.layers.eachLayer(l => {
-    try { const fid = l.toGeoJSON().properties?.__fid; if (fid) pending.delete(fid); } catch {}
+    try {
+      const fid = l.options.__fid ?? l.toGeoJSON().properties?.__fid;
+      if (!fid) return;
+
+      // Siempre limpiar del pending local
+      pending.delete(fid);
+
+      // Si vino de Firestore → eliminar el documento
+      if (l.options.__fromFirestore) {
+        deleteOps.push(
+          deleteDoc(doc(db, geomCollection, fid))
+        );
+        console.log(`🗑️ Eliminando doc Firestore: ${fid}`);
+      }
+    } catch (err) {
+      console.warn('DELETED layer error:', err);
+    }
   });
+
+  if (deleteOps.length > 0) {
+    try {
+      await Promise.all(deleteOps);
+      console.log(`✅ ${deleteOps.length} geometría(s) eliminada(s) de Firestore`);
+    } catch (err) {
+      console.error('❌ Error al eliminar de Firestore:', err?.code, err);
+      let msg = `❌ Error al eliminar\nCódigo: ${err?.code ?? 'desconocido'}\n${err?.message ?? ''}`;
+      if (err?.code === 'permission-denied')
+        msg += '\n\n💡 Solo puedes eliminar tus propias geometrías (o ser superusuario).';
+      alert(msg);
+    }
+  }
+
   actualizarBoton();
 });
 
@@ -274,7 +315,8 @@ function setDrawingEnabled(enabled) {
 function markDirty(layer, meta = {}) {
   try {
     const gj  = layer.toGeoJSON();
-    // Priorizar fid guardado en options (layers cargados desde Firestore)
+    // Priorizar __fid guardado en options (layers cargados desde Firestore)
+    // Esto evita crear un documento nuevo al editar uno existente
     const fid = layer.options.__fid ?? ensureFID(gj) ?? newFID();
     gj.properties.__fid = fid;
     pending.set(fid, { layer, meta });
@@ -449,10 +491,10 @@ function processLoadedLayers(layerGroup, fileName) {
 async function initRealtime() {
   if (unsubscribeRT) { try { unsubscribeRT(); } catch {} unsubscribeRT = null; }
 
-  // Limpiar localDrafts de layers previos de Firestore (no los borradores nuevos)
-  localDrafts.eachLayer(l => {
-    if (l.options.__fromFirestore) localDrafts.removeLayer(l);
-  });
+  // Limpiar layers de Firestore previos en localDrafts (no los borradores nuevos)
+  const toRemove = [];
+  localDrafts.eachLayer(l => { if (l.options.__fromFirestore) toRemove.push(l); });
+  toRemove.forEach(l => localDrafts.removeLayer(l));
 
   console.log('🔄 Listener en:', geomCollection);
 
@@ -462,25 +504,25 @@ async function initRealtime() {
       const fromCache = snap.metadata.fromCache;
       console.log(fromCache ? '🔌 cache:' : '☁️ servidor:', snap.size, 'docs');
 
-      // Limpiar overlays previos (solo los ajenos, no localDrafts)
+      // Limpiar overlays de autores ajenos
       for (const a in gruposPorAutor) {
         try { map.removeLayer(gruposPorAutor[a]); }          catch {}
         try { layerControl.removeLayer(gruposPorAutor[a]); } catch {}
         delete gruposPorAutor[a];
       }
 
-      // Limpiar layers propios previos de localDrafts (solo los de Firestore)
-      localDrafts.eachLayer(l => {
-        if (l.options.__fromFirestore) localDrafts.removeLayer(l);
-      });
+      // Limpiar layers de Firestore previos en localDrafts
+      const prevFirestore = [];
+      localDrafts.eachLayer(l => { if (l.options.__fromFirestore) prevFirestore.push(l); });
+      prevFirestore.forEach(l => localDrafts.removeLayer(l));
 
-      // Limpiar también el overlay de mis capas si existía
+      // Limpiar overlay "MIS CAPAS" previo del control
       try { layerControl.removeLayer(localDrafts); } catch {}
 
       docMap.clear();
       ownerByFid.clear();
 
-      // Agrupar por autor
+      // Agrupar documentos por autor
       const byAutor = {};
       snap.forEach(d => {
         const data = d.data();
@@ -515,16 +557,16 @@ async function initRealtime() {
               pointToLayer: (_, ll) => L.marker(ll),
               style: { color: esMio ? '#27ae60' : '#3498db', weight: 2, fillOpacity: 0.15 }
             }).eachLayer(l => {
-              l.options.customMetadata = { autor, comentario: item.comentario };
-              l.options.__fromFirestore = true;   // marca para identificarlos
-              l.options.__fid           = fid;    // preservar fid original
+              l.options.customMetadata  = { autor, comentario: item.comentario };
+              l.options.__fromFirestore = true;  // identifica layers de Firestore
+              l.options.__fid           = fid;   // preserva fid para update correcto
 
               l.bindPopup(generarTablaPopup(
                 item.comentario ?? '(sin nombre)', autor, fecha, gj.properties ?? {}
               ));
 
               if (esMio) {
-                // Layers propios → localDrafts (editables)
+                // Layers propios → localDrafts (editables y borrables con Leaflet.draw)
                 localDrafts.addLayer(l);
               } else {
                 // Layers ajenos → solo visualización
@@ -538,7 +580,7 @@ async function initRealtime() {
         });
 
         if (esMio) {
-          // Registrar localDrafts en el control de capas con label del usuario
+          // Registrar localDrafts en el control con label personalizado
           layerControl.addOverlay(localDrafts, label);
         } else {
           gruposPorAutor[autor] = grupo;
@@ -547,7 +589,7 @@ async function initRealtime() {
         }
       }
 
-      // Si no hay geometrías propias, igual registrar localDrafts en el control
+      // Si el usuario autenticado no tiene geometrías aún, igual mostrar en control
       if (myEmail && !byAutor[myEmail]) {
         layerControl.addOverlay(localDrafts, `<b>⭐ MIS CAPAS (0)</b>`);
       }
@@ -604,7 +646,6 @@ document.getElementById('saveBtn').onclick = async () => {
     if (ops.length === 0) { alert('No hay cambios válidos para guardar.'); return; }
 
     await Promise.all(ops);
-    localDrafts.clearLayers();
     pending.clear();
     actualizarBoton();
 
