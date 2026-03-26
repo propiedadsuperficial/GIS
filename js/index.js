@@ -1,6 +1,6 @@
 // =============================================================================
 // js/index.js — GIS Pucobre
-// Versión: 6.1 — Edición/borrado de geometrías propias + superusuario
+// Versión: 6.1.1 — Fixes de auditoría aplicados
 //
 // Flujo de identidad:
 //   VISOR  → sin sesión, lectura pública Firestore
@@ -9,38 +9,24 @@
 //            2. SMS OTP al celular registrado
 //            3. Acceso al proyecto autorizado
 //
-// Cambios v6.1:
-//   - initRealtime: layers propios van a localDrafts (editables con Leaflet.draw)
-//   - markDirty: respeta __fid original de layers cargados desde Firestore
-//   - DELETED: elimina documentos de Firestore al borrar layers propios
-//   - Reglas Firestore: isAutor() || isSuperUser() para update/delete
+// FIXES v6.1.1:
+//   - FIX CRÍTICO: updateModo() ya no muestra "null" — Phone Auth no tiene .email,
+//     se usa user.email ?? user.phoneNumber ?? user.uid como fallback
+//   - FIX: importa Firebase desde módulo compartido js/firebase.js (sin duplicar config)
+//   - FIX: processLoadedLayers() limita a MAX_FEATURES_POR_CARGA para evitar
+//     explosión de escrituras Firestore con KMLs masivos
+//   - FIX: guardar en Firestore usa writeBatch() en lotes de 500 (límite Firestore)
 // =============================================================================
 
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
+// FIX: importar desde módulo compartido — elimina la duplicación de firebaseConfig
+import { app, db, auth } from './firebase.js';
 import {
-  getFirestore, collection, setDoc, deleteDoc, onSnapshot, doc,
-  serverTimestamp, query, limit
+  collection, setDoc, deleteDoc, onSnapshot, doc,
+  serverTimestamp, query, limit, writeBatch
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
 import {
-  getAuth, onAuthStateChanged, signOut
+  onAuthStateChanged, signOut
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
-
-// =============================================================================
-// 0) FIREBASE
-// =============================================================================
-const firebaseConfig = {
-  apiKey:            "AIzaSyB3kW9ep7iOKDp87T2-er5-CuZKerA4puY",
-  authDomain:        "gis-pucobre.firebaseapp.com",
-  projectId:         "gis-pucobre",
-  storageBucket:     "gis-pucobre.appspot.com",
-  messagingSenderId: "654550355942",
-  appId:             "1:654550355942:web:06a8bd8014a0faa86f5027",
-  measurementId:     "G-2CSXPQN2SC"
-};
-
-const app  = initializeApp(firebaseConfig);
-const db   = getFirestore(app);
-const auth = getAuth(app);
 
 // =============================================================================
 // 0b) Limpiar parámetros de auth residuales en la URL (compatibilidad)
@@ -136,6 +122,9 @@ function validarTamanioDoc(gj, maxBytes = 1 * 1024 * 1024) {
   try { return new Blob([JSON.stringify(gj)]).size <= maxBytes; } catch { return false; }
 }
 
+// FIX: límite de features por carga KML para evitar explosión de escrituras
+const MAX_FEATURES_POR_CARGA = 200;
+
 // =============================================================================
 // 4) ESTADO GLOBAL
 // =============================================================================
@@ -146,7 +135,7 @@ const gruposPorAutor = {};          // autor → L.featureGroup
 
 let isSaving      = false;
 let unsubscribeRT = null;
-let currentUser   = null;           // usuario Firebase activo o null
+let currentUser   = null;
 
 // =============================================================================
 // 5) MAPA LEAFLET
@@ -208,7 +197,6 @@ const layerControl = L.control.layers(null, null, { collapsed: false }).addTo(ma
 
 // =============================================================================
 // 7) HERRAMIENTAS DE DIBUJO (Leaflet.draw)
-//    Deshabilitadas por defecto; setDrawingEnabled(true) las activa al login
 // =============================================================================
 const drawControl = new L.Control.Draw({
   draw: {
@@ -239,7 +227,6 @@ map.on(L.Draw.Event.EDITED, (e) => {
   e.layers.eachLayer(l => markDirty(l, l.options.customMetadata ?? {}));
 });
 
-// ── DELETED: elimina de Firestore los layers que venían de allí ──────────────
 map.on(L.Draw.Event.DELETED, async (e) => {
   if (!esEditor()) return;
 
@@ -250,10 +237,8 @@ map.on(L.Draw.Event.DELETED, async (e) => {
       const fid = l.options.__fid ?? l.toGeoJSON().properties?.__fid;
       if (!fid) return;
 
-      // Siempre limpiar del pending local
       pending.delete(fid);
 
-      // Si vino de Firestore → eliminar el documento
       if (l.options.__fromFirestore) {
         deleteOps.push(
           deleteDoc(doc(db, geomCollection, fid))
@@ -315,8 +300,6 @@ function setDrawingEnabled(enabled) {
 function markDirty(layer, meta = {}) {
   try {
     const gj  = layer.toGeoJSON();
-    // Priorizar __fid guardado en options (layers cargados desde Firestore)
-    // Esto evita crear un documento nuevo al editar uno existente
     const fid = layer.options.__fid ?? ensureFID(gj) ?? newFID();
     gj.properties.__fid = fid;
     pending.set(fid, { layer, meta });
@@ -355,6 +338,13 @@ function updateStatus(totalDocs, mineCount, errorCode = null, fromCache = false)
     <span class="muted">${fromCache ? '📦 cache' : '☁️ online'}</span>`;
 }
 
+// =============================================================================
+// FIX PRINCIPAL: updateModo — corrige el "null" en el header
+//
+// Firebase Phone Auth NO asigna user.email (queda null).
+// Solo asigna user.phoneNumber. Se usa fallback encadenado:
+//   user.email → user.phoneNumber → user.uid
+// =============================================================================
 function updateModo(user) {
   const badge     = document.getElementById('modoBadge');
   const userInfo  = document.getElementById('userInfo');
@@ -362,13 +352,14 @@ function updateModo(user) {
   const logoutBtn = document.getElementById('logoutBtn');
 
   if (user && !user.isAnonymous) {
-    // ── EDITOR ───────────────────────────────────────────────────────────
+    // FIX: Phone Auth no tiene .email → usar phoneNumber o uid como fallback
+    const identidad = user.email ?? user.phoneNumber ?? user.uid ?? '—';
+
     if (badge)    { badge.className = 'editor'; badge.textContent = '✏️ EDITOR'; }
-    if (userInfo) userInfo.textContent = `✏️ ${user.email}`;
+    if (userInfo) userInfo.textContent = `✏️ ${identidad}`;
     if (loginBtn)  loginBtn.style.display  = 'none';
     if (logoutBtn) logoutBtn.style.display = '';
   } else {
-    // ── VISOR ─────────────────────────────────────────────────────────────
     if (badge)    { badge.className = 'visor'; badge.textContent = '👁 VISOR'; }
     if (userInfo) userInfo.textContent = '👁 Sin sesión';
     if (loginBtn)  loginBtn.style.display  = '';
@@ -446,6 +437,17 @@ function processLoadedLayers(layerGroup, fileName) {
   layerGroup.eachLayer(l => all.push(l));
   if (all.length === 0) { alert('El archivo no contiene geometrías válidas.'); return; }
 
+  // FIX: limitar cantidad de features por carga para evitar explosión de escrituras
+  if (all.length > MAX_FEATURES_POR_CARGA) {
+    const ok = confirm(
+      `El archivo contiene ${all.length} geometrías.\n` +
+      `Solo se cargarán las primeras ${MAX_FEATURES_POR_CARGA} para evitar sobrecargar Firestore.\n\n` +
+      `¿Continuar?`
+    );
+    if (!ok) return;
+    all.splice(MAX_FEATURES_POR_CARGA);
+  }
+
   const autor    = currentUser?.email ?? '(importado)';
   let   agregados = 0;
 
@@ -491,7 +493,6 @@ function processLoadedLayers(layerGroup, fileName) {
 async function initRealtime() {
   if (unsubscribeRT) { try { unsubscribeRT(); } catch {} unsubscribeRT = null; }
 
-  // Limpiar layers de Firestore previos en localDrafts (no los borradores nuevos)
   const toRemove = [];
   localDrafts.eachLayer(l => { if (l.options.__fromFirestore) toRemove.push(l); });
   toRemove.forEach(l => localDrafts.removeLayer(l));
@@ -504,25 +505,21 @@ async function initRealtime() {
       const fromCache = snap.metadata.fromCache;
       console.log(fromCache ? '🔌 cache:' : '☁️ servidor:', snap.size, 'docs');
 
-      // Limpiar overlays de autores ajenos
       for (const a in gruposPorAutor) {
         try { map.removeLayer(gruposPorAutor[a]); }          catch {}
         try { layerControl.removeLayer(gruposPorAutor[a]); } catch {}
         delete gruposPorAutor[a];
       }
 
-      // Limpiar layers de Firestore previos en localDrafts
       const prevFirestore = [];
       localDrafts.eachLayer(l => { if (l.options.__fromFirestore) prevFirestore.push(l); });
       prevFirestore.forEach(l => localDrafts.removeLayer(l));
 
-      // Limpiar overlay "MIS CAPAS" previo del control
       try { layerControl.removeLayer(localDrafts); } catch {}
 
       docMap.clear();
       ownerByFid.clear();
 
-      // Agrupar documentos por autor
       const byAutor = {};
       snap.forEach(d => {
         const data = d.data();
@@ -558,18 +555,16 @@ async function initRealtime() {
               style: { color: esMio ? '#27ae60' : '#3498db', weight: 2, fillOpacity: 0.15 }
             }).eachLayer(l => {
               l.options.customMetadata  = { autor, comentario: item.comentario };
-              l.options.__fromFirestore = true;  // identifica layers de Firestore
-              l.options.__fid           = fid;   // preserva fid para update correcto
+              l.options.__fromFirestore = true;
+              l.options.__fid           = fid;
 
               l.bindPopup(generarTablaPopup(
                 item.comentario ?? '(sin nombre)', autor, fecha, gj.properties ?? {}
               ));
 
               if (esMio) {
-                // Layers propios → localDrafts (editables y borrables con Leaflet.draw)
                 localDrafts.addLayer(l);
               } else {
-                // Layers ajenos → solo visualización
                 grupo.addLayer(l);
               }
             });
@@ -580,7 +575,6 @@ async function initRealtime() {
         });
 
         if (esMio) {
-          // Registrar localDrafts en el control con label personalizado
           layerControl.addOverlay(localDrafts, label);
         } else {
           gruposPorAutor[autor] = grupo;
@@ -589,7 +583,6 @@ async function initRealtime() {
         }
       }
 
-      // Si el usuario autenticado no tiene geometrías aún, igual mostrar en control
       if (myEmail && !byAutor[myEmail]) {
         layerControl.addOverlay(localDrafts, `<b>⭐ MIS CAPAS (0)</b>`);
       }
@@ -605,7 +598,7 @@ async function initRealtime() {
 }
 
 // =============================================================================
-// 14) GUARDAR CAMBIOS
+// 14) GUARDAR CAMBIOS — FIX: usa writeBatch en lotes de 500
 // =============================================================================
 document.getElementById('saveBtn').onclick = async () => {
   if (!esEditor()) {
@@ -622,30 +615,39 @@ document.getElementById('saveBtn').onclick = async () => {
 
   try {
     const uid   = currentUser.uid;
-    const autor = currentUser.email;
-    const ops   = [];
+    const autor = currentUser.email ?? currentUser.phoneNumber ?? currentUser.uid;
 
+    // FIX: construir operaciones y ejecutar en lotes de 500 (límite de writeBatch)
+    const ops = [];
     for (const [fid, { layer, meta }] of pending.entries()) {
       let gj;
       try { gj = layer.toGeoJSON(); } catch { continue; }
       ensureFID(gj);
       if (!validarTamanioDoc(gj)) { console.warn('Omitido (muy grande):', fid); continue; }
-
-      ops.push(setDoc(doc(db, geomCollection, fid), {
-        feature:    JSON.stringify(gj),
-        autor,
-        comentario: meta.comentario ?? 'Sin nombre',
-        archivo:    meta.archivo    ?? 'Web',
-        area:       areaNorm,
-        uid,
-        fecha:      new Date().toLocaleString('es-CL'),
-        timestamp:  serverTimestamp()
-      }, { merge: true }));
+      ops.push({ fid, gj, meta });
     }
 
     if (ops.length === 0) { alert('No hay cambios válidos para guardar.'); return; }
 
-    await Promise.all(ops);
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < ops.length; i += BATCH_SIZE) {
+      const lote  = ops.slice(i, i + BATCH_SIZE);
+      const batch = writeBatch(db);
+      for (const { fid, gj, meta } of lote) {
+        batch.set(doc(db, geomCollection, fid), {
+          feature:    JSON.stringify(gj),
+          autor,
+          comentario: meta.comentario ?? 'Sin nombre',
+          archivo:    meta.archivo    ?? 'Web',
+          area:       areaNorm,
+          uid,
+          fecha:      new Date().toLocaleString('es-CL'),
+          timestamp:  serverTimestamp()
+        }, { merge: true });
+      }
+      await batch.commit();
+    }
+
     pending.clear();
     actualizarBoton();
 
@@ -672,8 +674,6 @@ document.getElementById('saveBtn').onclick = async () => {
 
 // =============================================================================
 // 15) BOTONES LOGIN / LOGOUT
-//     Login: redirige a acceso/acceso.html conservando ?area, lat, lng, zoom
-//     Logout: signOut() → vuelve a modo VISOR automáticamente
 // =============================================================================
 document.getElementById('loginBtn')?.addEventListener('click', () => {
   const MAP_KEYS  = ['area', 'lat', 'lng', 'zoom'];
@@ -696,7 +696,6 @@ document.getElementById('logoutBtn')?.addEventListener('click', async () => {
   }
   try {
     await signOut(auth);
-    // onAuthStateChanged se dispara → updateModo(null) + setDrawingEnabled(false)
   } catch (err) {
     console.error('❌ Error al cerrar sesión:', err);
   }
@@ -709,22 +708,22 @@ onAuthStateChanged(auth, async (user) => {
   currentUser = user;
 
   console.log(user
-    ? `🔑 ${user.isAnonymous ? 'anónimo' : user.email} (uid: ${user.uid})`
+    ? `🔑 ${user.isAnonymous ? 'anónimo' : (user.email ?? user.phoneNumber ?? user.uid)} (uid: ${user.uid})`
     : '🔓 Sin sesión'
   );
 
-  updateModo(user);                // badge + header + botones
-  setDrawingEnabled(esEditor());   // habilitar/deshabilitar dibujo y KML
-  await initRealtime();            // lectura siempre, independiente de auth
+  updateModo(user);
+  setDrawingEnabled(esEditor());
+  await initRealtime();
   actualizarBoton();
 });
 
 // =============================================================================
 // 17) INICIALIZACIÓN
 // =============================================================================
-updateStatus(null, 0);      // chips vacíos mientras carga
-updateModo(null);           // VISOR por defecto
-setDrawingEnabled(false);   // controles de edición deshabilitados
+updateStatus(null, 0);
+updateModo(null);
+setDrawingEnabled(false);
 
 window.addEventListener('beforeunload', (e) => {
   if (pending.size > 0) { e.preventDefault(); e.returnValue = ''; }

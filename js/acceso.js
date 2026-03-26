@@ -11,12 +11,15 @@
 //   4. Usuario ingresa código → signInWithPhoneNumber → acceso
 //   5. Se registra log de acceso (IP + timestamp) en Firestore colección "logs_acceso"
 //   6. Redirige a PROD con los parámetros originales del mapa
+//
+// FIXES v6.1.1:
+//   - Importa Firebase desde módulo compartido js/firebase.js (sin duplicar config)
+//   - Corrige campo "area" en logs_acceso (usaba parámetro URL que podía ser null)
 // =============================================================================
 
 const PROD_BASE  = 'https://propiedadsuperficial.github.io/GIS/';
 const ACCESO_URL = 'https://propiedadsuperficial.github.io/GIS/acceso/acceso.html';
 
-// --- Parámetros del mapa ---
 const MAP_KEYS = ['area', 'lat', 'lng', 'zoom'];
 
 function getSearchParams(url = window.location.href) {
@@ -44,7 +47,6 @@ function setCtxPill() {
   pill.textContent = p.toString() || 'sin parámetros';
 }
 
-// Persistencia de parámetros
 const MAP_PARAMS_KEY = 'gis:lastMapParams';
 function saveMapParams(params) {
   try { localStorage.setItem(MAP_PARAMS_KEY, params.toString()); } catch {}
@@ -63,37 +65,22 @@ function loadMapParams() {
   } catch { return null; }
 }
 
-// --- Firebase (v10, ES Modules) ---
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js';
+// FIX: importar Firebase desde módulo compartido — elimina duplicación de config
+import { auth, db } from './firebase.js';
 import {
-  getAuth, RecaptchaVerifier, signInWithPhoneNumber,
+  RecaptchaVerifier, signInWithPhoneNumber,
   setPersistence, browserLocalPersistence, onAuthStateChanged
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js';
 import {
-  getFirestore, doc, getDoc, collection, addDoc, serverTimestamp
+  doc, getDoc, collection, addDoc, serverTimestamp
 } from 'https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js';
-
-const firebaseConfig = {
-  apiKey:            "AIzaSyB3kW9ep7iOKDp87T2-er5-CuZKerA4puY",
-  authDomain:        "gis-pucobre.firebaseapp.com",
-  projectId:         "gis-pucobre",
-  storageBucket:     "gis-pucobre.appspot.com",
-  messagingSenderId: "654550355942",
-  appId:             "1:654550355942:web:06a8bd8014a0faa86f5027",
-  measurementId:     "G-2CSXPQN2SC"
-};
-
-const app  = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db   = getFirestore(app);
 
 await setPersistence(auth, browserLocalPersistence);
 
-// --- Elementos UI ---
-const stepEmail   = document.getElementById('step-email');
-const stepOtp     = document.getElementById('step-otp');
-const emailInput  = document.getElementById('email');
-const otpInput    = document.getElementById('otp-code');
+const stepEmail    = document.getElementById('step-email');
+const stepOtp      = document.getElementById('step-otp');
+const emailInput   = document.getElementById('email');
+const otpInput     = document.getElementById('otp-code');
 const btnVerificar = document.getElementById('btn-verificar');
 const btnIngresar  = document.getElementById('btn-ingresar');
 const btnVolver    = document.getElementById('btn-volver');
@@ -117,7 +104,6 @@ function disableStep2(disabled) {
   if (otpInput)    otpInput.readOnly    = disabled;
 }
 
-// --- Si ya hay sesión activa, redirigir directo ---
 onAuthStateChanged(auth, (user) => {
   const isOnAcceso = window.location.pathname.includes('/acceso.html');
   if (user && !user.isAnonymous && isOnAcceso) {
@@ -129,7 +115,6 @@ onAuthStateChanged(auth, (user) => {
   }
 });
 
-// --- reCAPTCHA invisible ---
 let recaptchaVerifier = null;
 function initRecaptcha() {
   if (recaptchaVerifier) return;
@@ -139,7 +124,6 @@ function initRecaptcha() {
   });
 }
 
-// --- Variables de estado ---
 let confirmationResult = null;
 let usuarioData        = null;
 let emailActual        = '';
@@ -166,7 +150,6 @@ btnVerificar?.addEventListener('click', async () => {
   setStatus(statusEmail, 'Verificando acceso…', 'warn');
 
   try {
-    // Consultar Firestore: Usuarios_GIS/{email}
     const userRef  = doc(db, 'Usuarios_GIS', email);
     const userSnap = await getDoc(userRef);
 
@@ -190,7 +173,6 @@ btnVerificar?.addEventListener('click', async () => {
       return;
     }
 
-    // Verificar que el proyecto en la URL esté autorizado para este usuario
     const areaParam = pickMapParams().get('area');
     if (areaParam && data.proyectos && Array.isArray(data.proyectos)) {
       const tieneAcceso = data.proyectos.some(p => p.toLowerCase() === areaParam.toLowerCase());
@@ -201,17 +183,14 @@ btnVerificar?.addEventListener('click', async () => {
       }
     }
 
-    // Guardar datos para el paso 2
     emailActual  = email;
     usuarioData  = data;
 
-    // Enviar SMS OTP
     initRecaptcha();
     setStatus(statusEmail, 'Enviando código SMS…', 'warn');
 
     confirmationResult = await signInWithPhoneNumber(auth, data.celular, recaptchaVerifier);
 
-    // Pasar a paso 2
     if (otpNombre) otpNombre.textContent = data.nombre || email;
     saveMapParams(pickMapParams());
 
@@ -224,7 +203,6 @@ btnVerificar?.addEventListener('click', async () => {
     console.error('Error paso 1:', err);
     setStatus(statusEmail, describeError(err), 'err');
     disableStep1(false);
-    // Resetear reCAPTCHA si hubo error de envío
     if (recaptchaVerifier) {
       try { recaptchaVerifier.clear(); } catch {}
       recaptchaVerifier = null;
@@ -250,12 +228,16 @@ btnIngresar?.addEventListener('click', async () => {
   try {
     await confirmationResult.confirm(code);
 
-    // Registrar log de acceso en Firestore
+    // FIX: usar área real del usuario, no solo el parámetro URL (que puede ser null)
+    const areaLog = pickMapParams().get('area')
+      ?? usuarioData?.proyectos?.[0]
+      ?? 'general';
+
     try {
       await addDoc(collection(db, 'logs_acceso'), {
         email:     emailActual,
         nombre:    usuarioData?.nombre ?? '',
-        area:      pickMapParams().get('area') ?? 'general',
+        area:      areaLog,
         timestamp: serverTimestamp(),
         userAgent: navigator.userAgent.slice(0, 200)
       });
@@ -263,7 +245,6 @@ btnIngresar?.addEventListener('click', async () => {
       console.warn('No se pudo registrar el log de acceso:', logErr);
     }
 
-    // Redirigir a PROD con parámetros del mapa
     const mapParams = pickMapParams();
     const target = `${PROD_BASE}${paramsToString(
       mapParams.toString() ? mapParams : (loadMapParams() ?? new URLSearchParams())
@@ -279,12 +260,10 @@ btnIngresar?.addEventListener('click', async () => {
   }
 });
 
-// Permitir confirmar con Enter en el campo OTP
 otpInput?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') btnIngresar?.click();
 });
 
-// --- Botón volver ---
 btnVolver?.addEventListener('click', () => {
   stepOtp.style.display   = 'none';
   stepEmail.style.display = 'block';
@@ -292,14 +271,12 @@ btnVolver?.addEventListener('click', () => {
   disableStep1(false);
   confirmationResult = null;
   if (otpInput) otpInput.value = '';
-  // Resetear reCAPTCHA para permitir reintento
   if (recaptchaVerifier) {
     try { recaptchaVerifier.clear(); } catch {}
     recaptchaVerifier = null;
   }
 });
 
-// --- Descripción de errores ---
 function describeError(err) {
   const code = err?.code || '';
   if (code === 'auth/invalid-phone-number')
@@ -317,5 +294,4 @@ function describeError(err) {
   return `Error: ${err?.message || err}`;
 }
 
-// --- Inicialización ---
 setCtxPill();
